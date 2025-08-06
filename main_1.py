@@ -216,7 +216,7 @@ class CameraUI:
         self.titer = self.titer_var.get().strip()
         self.base_path = self.base_path_var.get().strip()
 
-    def gstreamer_pipeline(self, sensor_id=0, capture_width=1280, capture_height=720, display_width=720, display_height=1280, framerate=30, flip_method=3):
+    def gstreamer_pipeline(self, sensor_id=0, capture_width=3280, capture_height=2464, display_width=720, display_height=958, framerate=21, flip_method=3):
         return (f"nvarguscamerasrc sensor-id={sensor_id} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, framerate=(fraction){framerate}/1 ! nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink")
 
     def start_preview(self):
