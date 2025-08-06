@@ -5,7 +5,6 @@ import os
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
-import subprocess
 import sys
 import time
 
@@ -29,15 +28,16 @@ class CameraUI:
         self.roi_selecting = False
         self.roi_start = None
 
-        # --- Correctly placed code block ---
+        # --- 스레드 및 상태 관리 ---
         self.preview_frame = None
         self.video_capture = None
-        self.preview_running = True
-        self.capture_process = None
+        self.preview_running = True     # 미리보기 스레드 실행 여부
+        self.is_capturing = False       # 실제 촬영(저장) 중인지 여부
+        self.capture_thread = None      # 촬영 스레드 객체
+        self.preview_thread = None      # 미리보기 스레드 객체
 
         self.setup_ui()
         self.start_preview()
-        # --- End of corrected block ---
 
     def setup_ui(self):
         # 메인 컨테이너를 좌우로 분할
@@ -247,12 +247,11 @@ class CameraUI:
 
         self.preview_info = tk.StringVar(value="미리보기 로딩중...")
         ttk.Label(info_frame, textvariable=self.preview_info, font=("Arial", 9)).pack()
-
+    
     def update_roi_preview(self, *args):
         """ROI 값 변경시 미리보기 업데이트"""
-        if self.preview_running:
-            # 다음 프레임에서 업데이트하도록 예약
-            self.root.after_idle(self.update_preview_display)
+        # 이 함수는 이제 update_preview_display() 호출로 대체됨
+        pass
 
     def reset_roi(self):
         """ROI 초기값으로 리셋"""
@@ -263,10 +262,12 @@ class CameraUI:
 
     def set_full_roi(self):
         """전체 화면으로 ROI 설정"""
-        self.xmin_var.set("0")
-        self.ymin_var.set("0")
-        self.width_var.set("720")
-        self.height_var.set("1280")
+        if self.preview_frame is not None:
+            height, width = self.preview_frame.shape[:2]
+            self.xmin_var.set("0")
+            self.ymin_var.set("0")
+            self.width_var.set(str(width))
+            self.height_var.set(str(height))
 
     def browse_base_path(self):
         """베이스 경로 선택"""
@@ -274,7 +275,6 @@ class CameraUI:
             title="Select Base Save Directory",
             initialdir=self.base_path_var.get() or os.path.expanduser("~")
         )
-
         if selected_path:
             self.base_path_var.set(selected_path)
 
@@ -287,14 +287,19 @@ class CameraUI:
 
     def validate_inputs(self):
         try:
+            if self.preview_frame is None:
+                raise ValueError("Preview is not available. Cannot validate ROI.")
+            
+            frame_h, frame_w = self.preview_frame.shape[:2]
+
             # ROI 검증
             xmin = int(self.xmin_var.get())
             ymin = int(self.ymin_var.get())
             width = int(self.width_var.get())
             height = int(self.height_var.get())
 
-            if (xmin + width) > 720 or (ymin + height) > 1280:
-                raise ValueError("ROI exceeds image bounds (720x1280)")
+            if (xmin + width) > frame_w or (ymin + height) > frame_h:
+                raise ValueError(f"ROI exceeds image bounds ({frame_w}x{frame_h})")
 
             if xmin < 0 or ymin < 0 or width <= 0 or height <= 0:
                 raise ValueError("ROI values must be positive")
@@ -306,210 +311,221 @@ class CameraUI:
             interval2 = float(self.interval2_var.get())
             end = float(self.end_var.get())
 
-            if interval1 < 0.25:
-                raise ValueError("Interval 1 minimum value is 0.25 seconds")
-
             if not all(v >= 0 for v in [start, interval1, middle, interval2, end]):
                 raise ValueError("All timing values must be non-negative")
 
             # 경로 검증
-            if not self.target_var.get().strip():
-                raise ValueError("Target name cannot be empty")
-            if not self.titer_var.get().strip():
-                raise ValueError("Titer name cannot be empty")
+            if not self.target_var.get().strip() or not self.titer_var.get().strip():
+                raise ValueError("Target and Titer names cannot be empty")
 
             return True
 
-        except ValueError as e:
+        except (ValueError, TclError) as e:
             messagebox.showerror("Input Error", str(e))
             return False
 
     def update_variables(self):
-        # ROI 업데이트
         self.crop['xmin'] = int(self.xmin_var.get())
         self.crop['ymin'] = int(self.ymin_var.get())
         self.crop['width'] = int(self.width_var.get())
         self.crop['height'] = int(self.height_var.get())
 
-        # 타이밍 업데이트
         self.cap_time['start'] = float(self.start_var.get())
         self.cap_time['interval_1'] = float(self.interval1_var.get())
         self.cap_time['middle'] = float(self.middle_var.get())
         self.cap_time['interval_2'] = float(self.interval2_var.get())
         self.cap_time['end'] = float(self.end_var.get())
 
-        # 경로 업데이트
         self.target = self.target_var.get().strip()
         self.titer = self.titer_var.get().strip()
-        self.base_path = self.base_path_var.get().strip() or './sample'
+        self.base_path = self.base_path_var.get().strip()
 
     def gstreamer_pipeline(self, sensor_id=0, capture_width=1280, capture_height=720,
                           display_width=720, display_height=1280, framerate=30, flip_method=3):
         return (
-            "nvarguscamerasrc sensor-id=%d ! "
-            "video/x-raw(memory:NVMM), width=(int)%d, height=(int)%d, framerate=(fraction)%d/1 ! "
-            "nvvidconv flip-method=%d ! "
-            "video/x-raw, width=(int)%d, height=(int)%d, format=(string)BGRx ! "
-            "videoconvert ! "
-            "video/x-raw, format=(string)BGR ! appsink"
-            % (sensor_id, capture_width, capture_height, framerate, flip_method, display_width, display_height)
+            f"nvarguscamerasrc sensor-id={sensor_id} ! "
+            f"video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, framerate=(fraction){framerate}/1 ! "
+            f"nvvidconv flip-method={flip_method} ! "
+            f"video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! "
+            "videoconvert ! video/x-raw, format=(string)BGR ! appsink"
         )
 
     def start_preview(self):
-        """카메라 미리보기 시작"""
-        def update_preview():
-            if not self.preview_running:
+        self.preview_thread = threading.Thread(target=self._preview_worker, daemon=True)
+        self.preview_thread.start()
+
+    def _preview_worker(self):
+        try:
+            self.video_capture = cv2.VideoCapture(self.gstreamer_pipeline(sensor_id=self.camera_id), cv2.CAP_GSTREAMER)
+            time.sleep(2)  # 카메라 초기화 시간
+
+            if not self.video_capture.isOpened():
+                self.root.after(0, lambda: self.preview_info.set("카메라 연결 실패"))
                 return
 
-            if self.video_capture is None:
-                try:
-                    self.video_capture = cv2.VideoCapture(
-                        self.gstreamer_pipeline(sensor_id=self.camera_id), cv2.CAP_GSTREAMER
-                    )
-                    time.sleep(0.5)  # 카메라 초기화 대기
-                except Exception:
-                    self.preview_info.set("카메라 연결 실패")
-                    if self.preview_running:
-                        self.root.after(2000, update_preview)
-                    return
-
-            if self.video_capture and self.video_capture.isOpened():
+            while self.preview_running:
                 ret, frame = self.video_capture.read()
                 if ret:
                     self.preview_frame = frame
-                    self.update_preview_display()
-                    self.preview_info.set(f"Live Preview - {frame.shape[1]}x{frame.shape[0]}")
+                    # 촬영 중이 아닐 때만 UI를 업데이트하여 부하를 줄임
+                    if not self.is_capturing:
+                        self.root.after_idle(self.update_preview_display)
                 else:
-                    self.preview_info.set("프레임 읽기 실패")
-            else:
-                self.preview_info.set("카메라 미연결")
-
-            if self.preview_running:
-                self.root.after(100, update_preview)
-
-        self.preview_running = True
-        threading.Thread(target=update_preview, daemon=True).start()
-
-    def stop_preview(self):
-        """미리보기 중지"""
-        self.preview_running = False
-        if self.video_capture:
-            self.video_capture.release()
-            self.video_capture = None
-        self.preview_canvas.delete("all")
-        self.preview_info.set("카메라 중지됨")
-
-    def create_capture_script(self):
-        """별도 캡처 스크립트 생성"""
-        script_content = f"""
-import sys
-sys.path.append('.')
-# Assuming simple_camera module and capture_time_series_image function exist
-from simple_camera import capture_time_series_image
-
-camera = {self.camera_id}
-crop = {self.crop}
-cap_time = {self.cap_time}
-target = '{self.target}'
-titer = '{self.titer}'
-
-if __name__ == '__main__':
-    capture_time_series_image(camera, crop, cap_time, target, titer)
-"""
-        script_name = f"capture_script_{self.camera_id}.py"
-        with open(script_name, 'w') as f:
-            f.write(script_content)
-        return script_name
+                    self.root.after_idle(lambda: self.preview_info.set("프레임 읽기 실패"))
+                time.sleep(1/60) # 60fps로 프레임 읽기 시도
+        
+        finally:
+            if self.video_capture:
+                self.video_capture.release()
+            print("Preview thread finished.")
 
     def start_camera(self):
+        if self.is_capturing:
+            return
         if not self.validate_inputs():
             return
-
         self.update_variables()
+
+        self.is_capturing = True
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
-        self.stop_preview()
+        self.status_var.set("Camera running...")
 
-        script_name = self.create_capture_script()
+        self.capture_thread = threading.Thread(target=self._capture_worker, daemon=True)
+        self.capture_thread.start()
 
-        def run_capture():
-            try:
-                self.root.after(0, lambda: self.status_var.set("Camera running..."))
-                self.capture_process = subprocess.Popen([sys.executable, script_name])
-                self.capture_process.wait()
-                self.root.after(0, lambda: self.status_var.set("Camera stopped"))
-            except Exception as e:
-                self.root.after(0, lambda: self.status_var.set(f"Error: {str(e)}"))
-                self.root.after(0, lambda: messagebox.showerror("Camera Error", str(e)))
-            finally:
-                self.root.after(0, self.cleanup_after_capture)
-                if os.path.exists(script_name):
-                    os.remove(script_name)
+    def _capture_worker(self):
+        try:
+            save_path = os.path.join(self.base_path, self.target, self.titer)
+            os.makedirs(save_path, exist_ok=True)
+            
+            existing_folders = [d for d in os.listdir(save_path) if os.path.isdir(os.path.join(save_path, d)) and d.isdigit()]
+            new_folder_num = 0
+            if existing_folders:
+                new_folder_num = max(map(int, existing_folders)) + 1
+            
+            version_path = os.path.join(save_path, str(new_folder_num))
+            os.makedirs(version_path, exist_ok=True)
+            print(f"--------- Capture Start: Saving to {version_path} ---------")
 
-        threading.Thread(target=run_capture, daemon=True).start()
+            # 타이밍 변수
+            start_delay = self.cap_time['start']
+            interval_1 = self.cap_time['interval_1']
+            middle_time = self.cap_time['middle']
+            interval_2 = self.cap_time['interval_2']
+            end_time = self.cap_time['end']
+            
+            capture_start_time = time.time()
+            next_cap_time_1 = capture_start_time + start_delay
+            next_cap_time_2 = capture_start_time + middle_time
+            
+            while self.is_capturing:
+                current_time = time.time()
+                elapsed_time = current_time - capture_start_time
+
+                if elapsed_time > end_time:
+                    break
+                
+                # 최신 프레임을 복사하여 사용 (원본 프레임 변경 방지)
+                frame_to_save = self.preview_frame.copy() if self.preview_frame is not None else None
+                if frame_to_save is None:
+                    time.sleep(0.01)
+                    continue
+                
+                xmin, ymin, w, h = self.crop['xmin'], self.crop['ymin'], self.crop['width'], self.crop['height']
+                save_frame = frame_to_save[ymin:ymin+h, xmin:xmin+w]
+
+                saved = False
+                # Part 1: Start ~ Middle
+                if start_delay <= elapsed_time < middle_time and current_time >= next_cap_time_1:
+                    filename = os.path.join(version_path, f"{elapsed_time:.2f}.png")
+                    cv2.imwrite(filename, save_frame)
+                    print(f"Captured {filename}")
+                    next_cap_time_1 += interval_1
+                    saved = True
+                # Part 2: Middle ~ End
+                elif middle_time <= elapsed_time < end_time and current_time >= next_cap_time_2:
+                    filename = os.path.join(version_path, f"{elapsed_time:.2f}.png")
+                    cv2.imwrite(filename, save_frame)
+                    print(f"Captured {filename}")
+                    next_cap_time_2 += interval_2
+                    saved = True
+                
+                if not saved:
+                    time.sleep(0.005) # CPU 부하 감소
+        
+        except Exception as e:
+            print(f"An error occurred during capture: {e}")
+        finally:
+            print("---------- Capture End ----------")
+            self.root.after(0, self.stop_camera)
 
     def stop_camera(self):
-        """캡처 중지"""
-        if self.capture_process:
-            self.capture_process.terminate()
-            self.capture_process = None
-        self.cleanup_after_capture()
-
-    def cleanup_after_capture(self):
-        """캡처 종료 후 정리"""
+        if not self.is_capturing:
+            return
+        self.is_capturing = False
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
-        self.root.after(1000, self.start_preview)
+        self.status_var.set("Ready")
 
     def update_preview_display(self):
-        """미리보기 디스플레이 업데이트"""
         if self.preview_frame is None or not self.preview_running:
             return
 
         canvas_width = self.preview_canvas.winfo_width()
         canvas_height = self.preview_canvas.winfo_height()
         if canvas_width <= 1 or canvas_height <= 1:
-            self.root.after(100, self.update_preview_display)
             return
 
-        height, width = self.preview_frame.shape[:2]
-        scale = min((canvas_width - 20) / width, (canvas_height - 20) / height, 0.8)
+        frame = self.preview_frame
+        height, width = frame.shape[:2]
+        
+        # 캔버스에 맞게 이미지 스케일 조정
+        scale = min(canvas_width / width, canvas_height / height)
         new_width = int(width * scale)
         new_height = int(height * scale)
+        
+        resized = cv2.resize(frame, (new_width, new_height))
 
-        resized = cv2.resize(self.preview_frame, (new_width, new_height))
-
+        # ROI 그리기
         try:
             xmin = int(self.xmin_var.get())
             ymin = int(self.ymin_var.get())
             roi_width = int(self.width_var.get())
             roi_height = int(self.height_var.get())
-
+            
+            # 원본 이미지 좌표를 스케일된 좌표로 변환
             scaled_xmin = int(xmin * scale)
             scaled_ymin = int(ymin * scale)
             scaled_width = int(roi_width * scale)
             scaled_height = int(roi_height * scale)
 
+            # 사각형 그리기
             cv2.rectangle(resized, (scaled_xmin, scaled_ymin), (scaled_xmin + scaled_width, scaled_ymin + scaled_height), (0, 255, 0), 2)
-            overlay = resized.copy()
-            cv2.rectangle(overlay, (scaled_xmin, scaled_ymin), (scaled_xmin + scaled_width, scaled_ymin + scaled_height), (0, 255, 0), -1)
-            cv2.addWeighted(resized, 0.8, overlay, 0.2, 0, resized)
-        except ValueError:
-            pass
+        except (ValueError, TclError):
+             pass # 값이 비어있거나 잘못된 경우 무시
 
         rgb_frame = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
         pil_image = Image.fromarray(rgb_frame)
-        photo = ImageTk.PhotoImage(image=pil_image)
+        self.photo = ImageTk.PhotoImage(image=pil_image) # self.photo로 참조 유지
 
         self.preview_canvas.delete("all")
-        x_offset = (canvas_width - new_width) // 2
-        y_offset = (canvas_height - new_height) // 2
-        self.preview_canvas.create_image(x_offset, y_offset, anchor=tk.NW, image=photo)
-        self.preview_canvas.image = photo
+        self.preview_canvas.create_image(canvas_width / 2, canvas_height / 2, anchor=tk.CENTER, image=self.photo)
 
     def on_mouse_press(self, event):
         if not self.preview_running: return
         self.roi_selecting = True
+        
+        # 캔버스 중앙 정렬이므로 오프셋 계산 필요
+        canvas_width = self.preview_canvas.winfo_width()
+        canvas_height = self.preview_canvas.winfo_height()
+        height, width = self.preview_frame.shape[:2]
+        scale = min(canvas_width / width, canvas_height / height)
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        self.x_offset = (canvas_width - new_width) / 2
+        self.y_offset = (canvas_height - new_height) / 2
+        
         self.roi_start = (event.x, event.y)
 
     def on_mouse_drag(self, event):
@@ -524,24 +540,24 @@ if __name__ == '__main__':
         canvas_width = self.preview_canvas.winfo_width()
         canvas_height = self.preview_canvas.winfo_height()
         height, width = self.preview_frame.shape[:2]
-        scale = min((canvas_width - 20) / width, (canvas_height - 20) / height, 0.8)
-        new_width = int(width * scale)
-        new_height = int(height * scale)
-        x_offset = (canvas_width - new_width) // 2
-        y_offset = (canvas_height - new_height) // 2
+        scale = min(canvas_width / width, canvas_height / height)
+        
+        # 캔버스 좌표를 원본 이미지 좌표로 변환
+        start_x_canvas = min(self.roi_start[0], event.x)
+        start_y_canvas = min(self.roi_start[1], event.y)
+        end_x_canvas = max(self.roi_start[0], event.x)
+        end_y_canvas = max(self.roi_start[1], event.y)
 
-        start_x = max(0, int((self.roi_start[0] - x_offset) / scale))
-        start_y = max(0, int((self.roi_start[1] - y_offset) / scale))
-        end_x = max(0, int((event.x - x_offset) / scale))
-        end_y = max(0, int((event.y - y_offset) / scale))
+        start_x_orig = int((start_x_canvas - self.x_offset) / scale)
+        start_y_orig = int((start_y_canvas - self.y_offset) / scale)
+        end_x_orig = int((end_x_canvas - self.x_offset) / scale)
+        end_y_orig = int((end_y_canvas - self.y_offset) / scale)
 
-        xmin, ymin = min(start_x, end_x), min(start_y, end_y)
-        xmax, ymax = max(start_x, end_x), max(start_y, end_y)
-
-        xmin = max(0, min(xmin, width - 10))
-        ymin = max(0, min(ymin, height - 10))
-        xmax = max(xmin + 10, min(xmax, width))
-        ymax = max(ymin + 10, min(ymax, height))
+        # 좌표 보정
+        xmin = max(0, start_x_orig)
+        ymin = max(0, start_y_orig)
+        xmax = min(width, end_x_orig)
+        ymax = min(height, end_y_orig)
 
         self.xmin_var.set(str(xmin))
         self.ymin_var.set(str(ymin))
@@ -552,28 +568,22 @@ if __name__ == '__main__':
         self.roi_selecting = False
         self.roi_start = None
 
-    def __del__(self):
-        self.preview_running = False
-        if self.video_capture:
-            self.video_capture.release()
-
     def run(self):
-        try:
-            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-            self.root.mainloop()
-        finally:
-            self.cleanup()
+        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        self.root.mainloop()
 
     def on_closing(self):
-        self.cleanup()
+        print("Closing application...")
+        self.preview_running = False
+        self.is_capturing = False
+
+        if self.preview_thread and self.preview_thread.is_alive():
+            self.preview_thread.join(timeout=2)
+        if self.capture_thread and self.capture_thread.is_alive():
+            self.capture_thread.join(timeout=2)
+            
         self.root.destroy()
 
-    def cleanup(self):
-        self.preview_running = False
-        if self.video_capture:
-            self.video_capture.release()
-        if self.capture_process and self.capture_process.poll() is None:
-            self.capture_process.terminate()
 
 if __name__ == '__main__':
     app = CameraUI(camera_id=0)
