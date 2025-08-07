@@ -13,32 +13,64 @@ class CameraUI:
         self.camera_id = camera_id
         self.root = tk.Tk()
         self.root.title(f"Camera {camera_id} Control Panel")
-        self.root.geometry("800x700")
+        self.root.geometry("850x800")
         self.root.resizable(True, True)
-        self.root.minsize(750, 650)
+        self.root.minsize(800, 800)
 
         # 기본값 설정
-        self.crop = {'xmin': 240, 'ymin': 100, 'width': 260, 'height': 1040}
-        self.cap_time = {'start': 0, 'interval_1': 1, 'middle': 900, 'interval_2': 1, 'end': 900}
+        self.start_delay = 0.0
+        self.cap_time = [
+            {'end_point': 10.0, 'interval': 1.0},
+            {'end_point': 20.0, 'interval': 1.0}
+        ]
+        self.crop = {'xmin': 240, 'ymin': 100, 'width': 260, 'height': 800}
         self.target = 'target'
         self.titer = 'titer'
         self.base_path = './sample'
 
-        # ROI 선택 관련 변수
         self.roi_selecting = False
         self.roi_start = None
         self.roi_widgets = []
-
-        # 스레드 및 상태 관리 변수
         self.preview_frame = None
         self.video_capture = None
         self.preview_running = True
         self.is_capturing = False
         self.capture_thread = None
         self.preview_thread = None
+        self.timing_vars = []
+        self.timing_frame_container = None
+        self.add_button = None
+        self.remove_button = None
 
         self.setup_ui()
         self.start_preview()
+
+        self.root.bind("<Up>", self._on_key_press)
+        self.root.bind("<Down>", self._on_key_press)
+        self.root.bind("<Left>", self._on_key_press)
+        self.root.bind("<Right>", self._on_key_press)
+
+    def _on_key_press(self, event):
+        if self.is_capturing:
+            return
+        try:
+            xmin = int(self.xmin_var.get())
+            ymin = int(self.ymin_var.get())
+            width = int(self.width_var.get())
+            height = int(self.height_var.get())
+        except (ValueError, tk.TclError):
+            return
+        step = 10 if (event.state & 0x0001) else 1
+        if event.keysym == 'Up': ymin -= step
+        elif event.keysym == 'Down': ymin += step
+        elif event.keysym == 'Left': xmin -= step
+        elif event.keysym == 'Right': xmin += step
+        if self.preview_frame is not None:
+            frame_h, frame_w = self.preview_frame.shape[:2]
+            xmin = max(0, min(xmin, frame_w - width))
+            ymin = max(0, min(ymin, frame_h - height))
+        self.xmin_var.set(str(xmin))
+        self.ymin_var.set(str(ymin))
 
     def setup_ui(self):
         main_paned = ttk.PanedWindow(self.root, orient=tk.HORIZONTAL)
@@ -136,31 +168,79 @@ class CameraUI:
         full_size_button.pack(side=tk.LEFT, padx=(5, 0))
         
         self.roi_widgets = [xmin_entry, ymin_entry, width_entry, height_entry, reset_button, full_size_button]
-        # -----------------------------------------------------------
-
-        help_label = ttk.Label(roi_frame, text="Tip: 오른쪽 미리보기에서 마우스로 드래그하여 ROI 선택 가능", font=("Arial", 8), foreground="gray")
+        help_text = "마우스 드래그로 ROI 선택, 방향키로 위치 이동 (Shift+방향키: 10px)"
+        help_label = ttk.Label(roi_frame, text=help_text, font=("Arial", 8), foreground="gray")
         help_label.pack(pady=(5, 0))
 
     def setup_timing_settings(self, parent):
         timing_frame = ttk.LabelFrame(parent, text="Capture Timing (seconds)", padding="10")
         timing_frame.pack(fill=tk.X, pady=(0, 10))
-        timing_grid = ttk.Frame(timing_frame)
-        timing_grid.pack(fill=tk.X)
-        ttk.Label(timing_grid, text="Start:").grid(row=0, column=0, sticky=tk.W)
-        self.start_var = tk.StringVar(value=str(self.cap_time['start']))
-        ttk.Entry(timing_grid, textvariable=self.start_var, width=6).grid(row=0, column=1, padx=5)
-        ttk.Label(timing_grid, text="Int1:").grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
-        self.interval1_var = tk.StringVar(value=str(self.cap_time['interval_1']))
-        ttk.Entry(timing_grid, textvariable=self.interval1_var, width=6).grid(row=0, column=3, padx=5)
-        ttk.Label(timing_grid, text="Middle:").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
-        self.middle_var = tk.StringVar(value=str(self.cap_time['middle']))
-        ttk.Entry(timing_grid, textvariable=self.middle_var, width=6).grid(row=1, column=1, padx=5, pady=(8, 0))
-        ttk.Label(timing_grid, text="Int2:").grid(row=1, column=2, sticky=tk.W, padx=(10, 0), pady=(8, 0))
-        self.interval2_var = tk.StringVar(value=str(self.cap_time['interval_2']))
-        ttk.Entry(timing_grid, textvariable=self.interval2_var, width=6).grid(row=1, column=3, padx=5, pady=(8, 0))
-        ttk.Label(timing_grid, text="End:").grid(row=2, column=0, sticky=tk.W, pady=(8, 0))
-        self.end_var = tk.StringVar(value=str(self.cap_time['end']))
-        ttk.Entry(timing_grid, textvariable=self.end_var, width=6).grid(row=2, column=1, padx=5, pady=(8, 0))
+
+        button_frame = ttk.Frame(timing_frame)
+        button_frame.pack(fill=tk.X, pady=(0, 5))
+        self.add_button = ttk.Button(button_frame, text="+", width=3, command=self._add_interval)
+        self.add_button.pack(side=tk.LEFT)
+        self.remove_button = ttk.Button(button_frame, text="-", width=3, command=self._remove_interval)
+        self.remove_button.pack(side=tk.LEFT, padx=5)
+
+        info_label = ttk.Label(timing_frame, text="Info: Middle/End 값은 '누적 종료 시점'입니다.", font=("Arial", 8), foreground="gray")
+        info_label.pack(anchor=tk.W, pady=(0, 10))
+        
+        self.timing_frame_container = ttk.Frame(timing_frame)
+        self.timing_frame_container.pack(fill=tk.X)
+        
+        self._redraw_timing_widgets()
+
+    def _redraw_timing_widgets(self):
+        for widget in self.timing_frame_container.winfo_children():
+            widget.destroy()
+        
+        self.timing_vars.clear()
+
+        start_frame = ttk.Frame(self.timing_frame_container)
+        start_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(start_frame, text="Start Delay:", width=10).grid(row=0, column=0, sticky=tk.W)
+        start_var = tk.StringVar(value=str(self.start_delay))
+        ttk.Entry(start_frame, textvariable=start_var, width=8).grid(row=0, column=1, padx=5)
+        self.timing_vars.append({'type': 'start', 'var': start_var})
+
+        ttk.Separator(self.timing_frame_container, orient='horizontal').pack(fill='x', pady=5)
+
+        num_phases = len(self.cap_time)
+        for i, phase_data in enumerate(self.cap_time):
+            phase_frame = ttk.Frame(self.timing_frame_container)
+            phase_frame.pack(fill=tk.X, pady=(0, 5))
+            
+            is_last_phase = (i == num_phases - 1)
+            label_text = f"End Point:" if is_last_phase else f"Middle {i+1} at:"
+            
+            ttk.Label(phase_frame, text=f"Interval {i+1}:", width=10).grid(row=0, column=0, sticky=tk.W)
+            interval_var = tk.StringVar(value=str(phase_data['interval']))
+            ttk.Entry(phase_frame, textvariable=interval_var, width=8).grid(row=0, column=1, padx=5)
+            
+            ttk.Label(phase_frame, text=label_text).grid(row=0, column=2, sticky=tk.W, padx=(10, 0))
+            endpoint_var = tk.StringVar(value=str(phase_data['end_point']))
+            ttk.Entry(phase_frame, textvariable=endpoint_var, width=8).grid(row=0, column=3, padx=5)
+
+            self.timing_vars.append({'type': 'phase', 'endpoint_var': endpoint_var, 'interval_var': interval_var})
+        
+        self._update_timing_buttons_state()
+
+    def _update_timing_buttons_state(self):
+        num_phases = len(self.cap_time)
+        self.add_button.config(state=tk.NORMAL if num_phases < 3 else tk.DISABLED)
+        self.remove_button.config(state=tk.NORMAL if num_phases > 1 else tk.DISABLED)
+        
+    def _add_interval(self):
+        if len(self.cap_time) < 3:
+            last_endpoint = self.cap_time[-1]['end_point'] if self.cap_time else 0
+            self.cap_time.append({'end_point': last_endpoint + 10.0, 'interval': 1.0})
+            self._redraw_timing_widgets()
+    
+    def _remove_interval(self):
+        if len(self.cap_time) > 1:
+            self.cap_time.pop()
+            self._redraw_timing_widgets()
 
     def setup_status_and_button(self, parent):
         status_frame = ttk.Frame(parent)
@@ -216,16 +296,39 @@ class CameraUI:
             frame_h, frame_w = self.preview_frame.shape[:2]
             xmin, ymin, width, height = int(self.xmin_var.get()), int(self.ymin_var.get()), int(self.width_var.get()), int(self.height_var.get())
             if (xmin + width) > frame_w or (ymin + height) > frame_h: raise ValueError(f"ROI exceeds image bounds ({frame_w}x{frame_h})")
-            if not all(v >= 0 for v in [float(self.start_var.get()), float(self.interval1_var.get()), float(self.middle_var.get()), float(self.interval2_var.get()), float(self.end_var.get())]): raise ValueError("Timing values must be non-negative")
+            
+            last_endpoint = float(self.timing_vars[0]['var'].get())
+            if last_endpoint < 0: raise ValueError("Start Delay must be non-negative")
+
+            for var_dict in self.timing_vars:
+                if var_dict['type'] == 'phase':
+                    endpoint = float(var_dict['endpoint_var'].get())
+                    interval = float(var_dict['interval_var'].get())
+                    if interval <= 0:
+                        raise ValueError("Intervals must be positive (e.g. > 0)")
+                    if endpoint <= last_endpoint:
+                        raise ValueError("Each end point must be greater than the previous time point.")
+                    last_endpoint = endpoint
+
             if not self.target_var.get().strip() or not self.titer_var.get().strip(): raise ValueError("Target and Titer names cannot be empty")
             return True
-        except Exception as e:
+        except (ValueError, tk.TclError) as e:
             messagebox.showerror("Input Error", str(e))
             return False
 
     def update_variables(self):
         self.crop = {'xmin': int(self.xmin_var.get()), 'ymin': int(self.ymin_var.get()), 'width': int(self.width_var.get()), 'height': int(self.height_var.get())}
-        self.cap_time = {'start': float(self.start_var.get()), 'interval_1': float(self.interval1_var.get()), 'middle': float(self.middle_var.get()), 'interval_2': float(self.interval2_var.get()), 'end': float(self.end_var.get())}
+        
+        self.cap_time.clear()
+        for var_dict in self.timing_vars:
+            if var_dict['type'] == 'start':
+                self.start_delay = float(var_dict['var'].get())
+            elif var_dict['type'] == 'phase':
+                self.cap_time.append({
+                    'end_point': float(var_dict['endpoint_var'].get()),
+                    'interval': float(var_dict['interval_var'].get())
+                })
+
         self.target = self.target_var.get().strip()
         self.titer = self.titer_var.get().strip()
         self.base_path = self.base_path_var.get().strip()
@@ -266,7 +369,6 @@ class CameraUI:
         self.stop_button.config(state=tk.NORMAL)
         self.status_var.set("Capturing... (Live)")
         
-        # --- ROI 위젯 비활성화 ---
         for widget in self.roi_widgets:
             widget.config(state=tk.DISABLED)
         
@@ -283,36 +385,59 @@ class CameraUI:
             os.makedirs(version_path, exist_ok=True)
             print(f"--------- Capture Start: Saving to {version_path} ---------")
 
-            start_delay, interval_1, middle_time, interval_2, end_time = self.cap_time.values()
-            capture_start_time = time.time()
-            next_cap_time_1 = capture_start_time + start_delay
-            next_cap_time_2 = capture_start_time + middle_time
+            phases = []
+            last_end_point = self.start_delay
+            for phase_data in self.cap_time:
+                start_point = last_end_point
+                phases.append({
+                    'start': start_point,
+                    'end': phase_data['end_point'],
+                    'interval': phase_data['interval'],
+                    'next_scheduled_cap': start_point
+                })
+                last_end_point = phase_data['end_point']
             
+            total_duration = last_end_point
+            capture_start_time = time.time()
+            
+            num_phases = len(phases)
             while self.is_capturing:
-                current_time = time.time()
-                elapsed_time = current_time - capture_start_time
-                if elapsed_time > end_time: break
+                current_loop_time = time.time()
+                elapsed_time = current_loop_time - capture_start_time
+
+                if elapsed_time > total_duration + 0.01:
+                    break
                 
                 if self.preview_frame is None:
                     time.sleep(0.01)
                     continue
                 
-                saved = False
-                if start_delay <= elapsed_time < middle_time and current_time >= next_cap_time_1:
-                    filename = os.path.join(version_path, f"{elapsed_time:.2f}.png")
-                    saved = True
-                    next_cap_time_1 += interval_1
-                elif middle_time <= elapsed_time < end_time and current_time >= next_cap_time_2:
-                    filename = os.path.join(version_path, f"{elapsed_time:.2f}.png")
-                    saved = True
-                    next_cap_time_2 += interval_2
-                
-                if saved:
-                    frame_to_save = self.preview_frame.copy()
-                    xmin, ymin, w, h = self.crop.values()
-                    save_frame = frame_to_save[ymin:ymin+h, xmin:xmin+w]
-                    cv2.imwrite(filename, save_frame)
-                    print(f"Captured {filename}")
+                for i, phase in enumerate(phases):
+                    is_last_phase = (i == num_phases - 1)
+                    
+                    in_phase = False
+                    if is_last_phase:
+                        if phase['start'] <= elapsed_time <= phase['end'] + 0.01:
+                            in_phase = True
+                    else:
+                        if phase['start'] <= elapsed_time < phase['end']:
+                            in_phase = True
+
+                    if in_phase:
+                        if elapsed_time >= phase['next_scheduled_cap']:
+                            filename = os.path.join(version_path, f"{elapsed_time:.2f}.png")
+                            
+                            frame_to_save = self.preview_frame.copy()
+                            xmin, ymin, w, h = self.crop.values()
+                            save_frame = frame_to_save[ymin:ymin+h, xmin:xmin+w]
+                            cv2.imwrite(filename, save_frame)
+                            print(f"Captured {filename} (Scheduled: {phase['next_scheduled_cap']:.2f}s) in Phase {i+1}")
+
+                            if phase['interval'] > 0:
+                                phase['next_scheduled_cap'] += phase['interval']
+                            else:
+                                phase['next_scheduled_cap'] = float('inf')
+                        break
 
                 time.sleep(0.005)
         except Exception as e:
@@ -327,8 +452,6 @@ class CameraUI:
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.status_var.set("Ready")
-
-        # --- ROI 위젯 다시 활성화 ---
         for widget in self.roi_widgets:
             widget.config(state=tk.NORMAL)
 
@@ -357,9 +480,7 @@ class CameraUI:
         self.preview_canvas.create_image(canvas_width / 2, canvas_height / 2, anchor=tk.CENTER, image=self.photo)
 
     def on_mouse_press(self, event):
-        # --- 촬영 중 마우스 기능 비활성화 ---
         if self.is_capturing: return
-        
         if not self.preview_running or self.preview_frame is None: return
         self.roi_selecting = True
         canvas_width, canvas_height = self.preview_canvas.winfo_width(), self.preview_canvas.winfo_height()
@@ -371,17 +492,13 @@ class CameraUI:
         self.roi_start = (event.x, event.y)
 
     def on_mouse_drag(self, event):
-        # --- 촬영 중 마우스 기능 비활성화 ---
         if self.is_capturing: return
-        
         if self.roi_selecting and self.roi_start:
             self.preview_canvas.delete("temp_roi")
             self.preview_canvas.create_rectangle(self.roi_start[0], self.roi_start[1], event.x, event.y, outline="red", width=2, tags="temp_roi")
 
     def on_mouse_release(self, event):
-        # --- 촬영 중 마우스 기능 비활성화 ---
         if self.is_capturing: return
-        
         if not (self.roi_selecting and self.roi_start and self.preview_frame is not None): return
         canvas_width, canvas_height = self.preview_canvas.winfo_width(), self.preview_canvas.winfo_height()
         height, width = self.preview_frame.shape[:2]
