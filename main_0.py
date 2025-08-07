@@ -27,6 +27,7 @@ class CameraUI:
         # ROI 선택 관련 변수
         self.roi_selecting = False
         self.roi_start = None
+        self.roi_widgets = []
 
         # 스레드 및 상태 관리 변수
         self.preview_frame = None
@@ -104,22 +105,39 @@ class CameraUI:
         roi_frame.pack(fill=tk.X, pady=(0, 10))
         roi_grid = ttk.Frame(roi_frame)
         roi_grid.pack(fill=tk.X)
+        
         ttk.Label(roi_grid, text="X Min:").grid(row=0, column=0, sticky=tk.W)
         self.xmin_var = tk.StringVar(value=str(self.crop['xmin']))
-        ttk.Entry(roi_grid, textvariable=self.xmin_var, width=8).grid(row=0, column=1, padx=(5, 10))
+        xmin_entry = ttk.Entry(roi_grid, textvariable=self.xmin_var, width=8)
+        xmin_entry.grid(row=0, column=1, padx=(5, 10))
+
         ttk.Label(roi_grid, text="Y Min:").grid(row=0, column=2, sticky=tk.W)
         self.ymin_var = tk.StringVar(value=str(self.crop['ymin']))
-        ttk.Entry(roi_grid, textvariable=self.ymin_var, width=8).grid(row=0, column=3, padx=5)
+        ymin_entry = ttk.Entry(roi_grid, textvariable=self.ymin_var, width=8)
+        ymin_entry.grid(row=0, column=3, padx=5)
+
         ttk.Label(roi_grid, text="Width:").grid(row=1, column=0, sticky=tk.W, pady=(8, 0))
         self.width_var = tk.StringVar(value=str(self.crop['width']))
-        ttk.Entry(roi_grid, textvariable=self.width_var, width=8).grid(row=1, column=1, padx=(5, 10), pady=(8, 0))
+        width_entry = ttk.Entry(roi_grid, textvariable=self.width_var, width=8)
+        width_entry.grid(row=1, column=1, padx=(5, 10), pady=(8, 0))
+
         ttk.Label(roi_grid, text="Height:").grid(row=1, column=2, sticky=tk.W, pady=(8, 0))
         self.height_var = tk.StringVar(value=str(self.crop['height']))
-        ttk.Entry(roi_grid, textvariable=self.height_var, width=8).grid(row=1, column=3, padx=5, pady=(8, 0))
+        height_entry = ttk.Entry(roi_grid, textvariable=self.height_var, width=8)
+        height_entry.grid(row=1, column=3, padx=5, pady=(8, 0))
+
         button_frame = ttk.Frame(roi_frame)
         button_frame.pack(fill=tk.X, pady=(10, 0))
-        ttk.Button(button_frame, text="Reset ROI", command=self.reset_roi).pack(side=tk.LEFT)
-        ttk.Button(button_frame, text="Full Size", command=self.set_full_roi).pack(side=tk.LEFT, padx=(5, 0))
+
+        reset_button = ttk.Button(button_frame, text="Reset ROI", command=self.reset_roi)
+        reset_button.pack(side=tk.LEFT)
+        
+        full_size_button = ttk.Button(button_frame, text="Full Size", command=self.set_full_roi)
+        full_size_button.pack(side=tk.LEFT, padx=(5, 0))
+        
+        self.roi_widgets = [xmin_entry, ymin_entry, width_entry, height_entry, reset_button, full_size_button]
+        # -----------------------------------------------------------
+
         help_label = ttk.Label(roi_frame, text="Tip: 오른쪽 미리보기에서 마우스로 드래그하여 ROI 선택 가능", font=("Arial", 8), foreground="gray")
         help_label.pack(pady=(5, 0))
 
@@ -194,16 +212,12 @@ class CameraUI:
 
     def validate_inputs(self):
         try:
-            if self.preview_frame is None:
-                raise ValueError("Preview not available.")
+            if self.preview_frame is None: raise ValueError("Preview not available.")
             frame_h, frame_w = self.preview_frame.shape[:2]
             xmin, ymin, width, height = int(self.xmin_var.get()), int(self.ymin_var.get()), int(self.width_var.get()), int(self.height_var.get())
-            if (xmin + width) > frame_w or (ymin + height) > frame_h:
-                raise ValueError(f"ROI exceeds image bounds ({frame_w}x{frame_h})")
-            if not all(v >= 0 for v in [float(self.start_var.get()), float(self.interval1_var.get()), float(self.middle_var.get()), float(self.interval2_var.get()), float(self.end_var.get())]):
-                raise ValueError("Timing values must be non-negative")
-            if not self.target_var.get().strip() or not self.titer_var.get().strip():
-                raise ValueError("Target and Titer names cannot be empty")
+            if (xmin + width) > frame_w or (ymin + height) > frame_h: raise ValueError(f"ROI exceeds image bounds ({frame_w}x{frame_h})")
+            if not all(v >= 0 for v in [float(self.start_var.get()), float(self.interval1_var.get()), float(self.middle_var.get()), float(self.interval2_var.get()), float(self.end_var.get())]): raise ValueError("Timing values must be non-negative")
+            if not self.target_var.get().strip() or not self.titer_var.get().strip(): raise ValueError("Target and Titer names cannot be empty")
             return True
         except Exception as e:
             messagebox.showerror("Input Error", str(e))
@@ -216,7 +230,7 @@ class CameraUI:
         self.titer = self.titer_var.get().strip()
         self.base_path = self.base_path_var.get().strip()
 
-    def gstreamer_pipeline(self, sensor_id=0, capture_width=3280, capture_height=2464, display_width=720, display_height=958, framerate=21, flip_method=3):
+    def gstreamer_pipeline(self, sensor_id=0, capture_width=1280, capture_height=720, display_width=720, display_height=1280, framerate=30, flip_method=3):
         return (f"nvarguscamerasrc sensor-id={sensor_id} ! video/x-raw(memory:NVMM), width=(int){capture_width}, height=(int){capture_height}, framerate=(fraction){framerate}/1 ! nvvidconv flip-method={flip_method} ! video/x-raw, width=(int){display_width}, height=(int){display_height}, format=(string)BGRx ! videoconvert ! video/x-raw, format=(string)BGR ! appsink")
 
     def start_preview(self):
@@ -230,7 +244,6 @@ class CameraUI:
             if not self.video_capture.isOpened():
                 self.root.after(0, lambda: self.preview_info.set("카메라 연결 실패"))
                 return
-
             while self.preview_running:
                 ret, frame = self.video_capture.read()
                 if ret:
@@ -252,6 +265,11 @@ class CameraUI:
         self.start_button.config(state=tk.DISABLED)
         self.stop_button.config(state=tk.NORMAL)
         self.status_var.set("Capturing... (Live)")
+        
+        # --- ROI 위젯 비활성화 ---
+        for widget in self.roi_widgets:
+            widget.config(state=tk.DISABLED)
+        
         self.capture_thread = threading.Thread(target=self._capture_worker, daemon=True)
         self.capture_thread.start()
 
@@ -265,7 +283,7 @@ class CameraUI:
             os.makedirs(version_path, exist_ok=True)
             print(f"--------- Capture Start: Saving to {version_path} ---------")
 
-            start_delay, interval_1, middle_time, interval_2, end_time = self.cap_time['start'], self.cap_time['interval_1'], self.cap_time['middle'], self.cap_time['interval_2'], self.cap_time['end']
+            start_delay, interval_1, middle_time, interval_2, end_time = self.cap_time.values()
             capture_start_time = time.time()
             next_cap_time_1 = capture_start_time + start_delay
             next_cap_time_2 = capture_start_time + middle_time
@@ -291,7 +309,7 @@ class CameraUI:
                 
                 if saved:
                     frame_to_save = self.preview_frame.copy()
-                    xmin, ymin, w, h = self.crop['xmin'], self.crop['ymin'], self.crop['width'], self.crop['height']
+                    xmin, ymin, w, h = self.crop.values()
                     save_frame = frame_to_save[ymin:ymin+h, xmin:xmin+w]
                     cv2.imwrite(filename, save_frame)
                     print(f"Captured {filename}")
@@ -309,6 +327,10 @@ class CameraUI:
         self.start_button.config(state=tk.NORMAL)
         self.stop_button.config(state=tk.DISABLED)
         self.status_var.set("Ready")
+
+        # --- ROI 위젯 다시 활성화 ---
+        for widget in self.roi_widgets:
+            widget.config(state=tk.NORMAL)
 
     def update_preview_display(self):
         if self.preview_frame is None or not self.preview_running: return
@@ -335,6 +357,9 @@ class CameraUI:
         self.preview_canvas.create_image(canvas_width / 2, canvas_height / 2, anchor=tk.CENTER, image=self.photo)
 
     def on_mouse_press(self, event):
+        # --- 촬영 중 마우스 기능 비활성화 ---
+        if self.is_capturing: return
+        
         if not self.preview_running or self.preview_frame is None: return
         self.roi_selecting = True
         canvas_width, canvas_height = self.preview_canvas.winfo_width(), self.preview_canvas.winfo_height()
@@ -346,11 +371,17 @@ class CameraUI:
         self.roi_start = (event.x, event.y)
 
     def on_mouse_drag(self, event):
+        # --- 촬영 중 마우스 기능 비활성화 ---
+        if self.is_capturing: return
+        
         if self.roi_selecting and self.roi_start:
             self.preview_canvas.delete("temp_roi")
             self.preview_canvas.create_rectangle(self.roi_start[0], self.roi_start[1], event.x, event.y, outline="red", width=2, tags="temp_roi")
 
     def on_mouse_release(self, event):
+        # --- 촬영 중 마우스 기능 비활성화 ---
+        if self.is_capturing: return
+        
         if not (self.roi_selecting and self.roi_start and self.preview_frame is not None): return
         canvas_width, canvas_height = self.preview_canvas.winfo_width(), self.preview_canvas.winfo_height()
         height, width = self.preview_frame.shape[:2]
