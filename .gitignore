@@ -144,6 +144,9 @@ ENV/
 env.bak/
 venv.bak/
 
+# Sample directory
+sample/
+
 # Spyder project settings
 .spyderproject
 .spyproject
