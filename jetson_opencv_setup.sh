@@ -23,6 +23,10 @@ echo "기본 패키지 설치 중..."
 sudo apt install -y python3-numpy
 sudo apt install -y python3-dev python3-pip
 
+echo "GUI 및 이미지 처리를 위한 패키지 설치 중..."
+sudo apt install -y python3-tk
+pip3 install Pillow
+
 echo "NVIDIA OpenCV 설치 중..."
 sudo apt install -y nvidia-opencv
 
@@ -31,7 +35,6 @@ echo "   - NVIDIA OpenCV 설치 완료"
 echo "카메라 권한 설정 중..."
 sudo usermod -a -G video $USER
 sudo chmod 666 /dev/video* 2>/dev/null || true
-
 echo "   - 카메라 권한 설정 완료"
 
 echo "프로젝트 폴더 생성 중..."
